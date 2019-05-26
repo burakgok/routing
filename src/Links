@@ -1,0 +1,26 @@
+A B 1
+B C 4
+C D 3
+D A 2
+
+sleep 2 // Initialization
+
+// Distance Changed
+#A D 4
+#sleep 5
+
+// Link Congested and Recovered
+C D inf
+sleep 5
+C D 3
+
+// Link Added and Broken
+#B D 2
+#sleep 5
+#B D inf
+
+// Node Left
+#A leave
+
+// Node Joined
+#E join D 5
