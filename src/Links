@@ -3,20 +3,20 @@ B C 4
 C D 3
 D A 2
 
-sleep 2 // Initialization
+wait 2 // Initialization
 
 // Distance Changed
 #A D 4
-#sleep 5
+#wait 5
 
 // Link Congested and Recovered
 C D inf
-sleep 5
+wait 5
 C D 3
 
 // Link Added and Broken
 #B D 2
-#sleep 5
+#wait 5
 #B D inf
 
 // Node Left

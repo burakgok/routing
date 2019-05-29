@@ -177,7 +177,7 @@ public class Program {
     }
     private static final Pattern
         LINE     = compile("([^/#]*)(?:(?://|#).*)?"),
-        ENV_CMD  = compile("sleep (%s)", FP),
+        ENV_CMD  = compile("wait (%s)", FP),
         LINK_CMD = compile("(\\w+) (\\w+) (%s|inf)", FP),
         NODE_CMD = compile("(\\w+) (leave|join((?: \\w+ %s)*))", FP),
         NEIGHBOR = compile(" (\\w+) (%s)", FP);
