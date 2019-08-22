@@ -5,14 +5,28 @@ D A 2
 
 wait 2 // Initialization
 
+// Does the order of processing matter?
+E join C 2 B 9
+B C 6
+wait 5
+A C 2
+A D 1
+
+// Does the order of processing matter?
+#E join C 2 B 7
+#wait 5
+#A C 2
+#wait 5
+#A B 4
+
 // Distance Changed
 #A D 4
 #wait 5
 
 // Link Congested and Recovered
-C D inf
-wait 5
-C D 3
+#C D inf
+#wait 5
+#C D 3
 
 // Link Added and Broken
 #B D 2

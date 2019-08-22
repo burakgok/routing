@@ -10,6 +10,7 @@ import java.util.Map;
 import java.util.Timer;
 import java.util.TimerTask;
 import java.util.function.Function;
+import java.util.function.Predicate;
 import java.util.stream.Collectors;
 import java.util.stream.Stream;
 
@@ -151,8 +152,13 @@ public class Node implements Runnable {
                 new NodeInfo(vector.source, reportedDistance));
             if (putIfAbsent(nodes, vector.source, _sender))
                 updated.add(_sender);
+            
+            List<NodeInfoBase> updates = partition(update -> {
+                NodeInfo node = nodes.get(update.address);
+                return node != null && node.via == null;
+            }, true, vector.nodes);
 
-            for (NodeInfoBase update : vector.nodes) {
+            for (NodeInfoBase update : updates) {
                 if (update.address == address)
                     // Neighbor distances are measured by pinging.
                     continue;
@@ -168,15 +174,16 @@ public class Node implements Runnable {
                     }
                 } else {
                     if (newDistance < node.distance) {
-                        updateByCheckingDescendents(node, newDistance, updated);
                         node.via = sender;
+                        updateByCheckingDescendants(node, newDistance, updated);
                         updated.add(node);
                     }
-                    else if (node.distance != newDistance && node.via == sender) {
+                    else if (node.distance != newDistance && node.via == sender
+                            && !updated.contains(node)) {
                         updateByCheckingLinks(node, newDistance);
                         updated.add(node);
                     }
-                    if (_sender.distance + node.distance < update.distance
+                    if (reportedDistance + node.distance < update.distance
                             && node.via != sender)
                         inform.add(update);
                 }
@@ -228,7 +235,7 @@ public class Node implements Runnable {
                             && neighbor.distance != node.distance)
                             || (node.via != null
                             && neighbor.distance <= node.distance)) {
-                        updateByCheckingDescendents(node, neighbor.distance,
+                        updateByCheckingDescendants(node, neighbor.distance,
                             updated);
                         node.via = null;
                         updated.add(node);
@@ -257,7 +264,7 @@ public class Node implements Runnable {
         return neighbors.values().stream()
             .filter(neighbor -> Double.isFinite(neighbor.distance));
     }
-    private void updateByCheckingDescendents(NodeInfo node, double distance,
+    private void updateByCheckingDescendants(NodeInfo node, double distance,
             List<NodeInfo> updated) {
         Neighbor neighbor = neighbors.get(node.address);
         if (neighbor == null || !Double.isFinite(node.distance)) {
@@ -270,13 +277,14 @@ public class Node implements Runnable {
         nodes.values().stream()
             .filter(n -> n.via == neighbor)
             .forEach(n -> {
+                n.via = node.via != null ? node.via : neighbor;
                 updateByCheckingLinks(n, n.distance + delta);
                 updated.add(n);
             });
     }
     private void updateByCheckingLinks(NodeInfo node, double distance) {
         Neighbor neighbor = neighbors.get(node.address);
-        if (neighbor != null && neighbor.distance < distance) {
+        if (neighbor != null && neighbor.distance <= distance) {
             node.distance = neighbor.distance;
             node.via = null;
         }
@@ -434,6 +442,15 @@ public class Node implements Runnable {
         if (v == null)
             map.put(key, value);
         return v == null;
+    }
+    
+    private static <T> List<T> partition(
+            Predicate<? super T> predicate, boolean reverse, T... values) {
+        return Stream.of(values)
+            .collect(Collectors.partitioningBy(
+                reverse ? predicate.negate() : predicate))
+            .values().stream().flatMap(List::stream)
+            .collect(Collectors.toList());
     }
     
     private static String format(double number) {
