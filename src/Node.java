@@ -2,15 +2,14 @@
 import java.io.IOException;
 import java.io.Serializable;
 import java.net.SocketException;
-import java.util.ArrayList;
 import java.util.Collection;
+import java.util.HashMap;
 import java.util.Iterator;
 import java.util.List;
 import java.util.Map;
 import java.util.Timer;
 import java.util.TimerTask;
 import java.util.function.Function;
-import java.util.function.Predicate;
 import java.util.stream.Collectors;
 import java.util.stream.Stream;
 
@@ -22,7 +21,7 @@ import java.util.stream.Stream;
 public class Node implements Runnable {
     private final int address;
     private final Map<Integer, Neighbor> neighbors;
-    private final Map<Integer, NodeInfo> nodes;
+    private final Map<Integer, NodeInfo> nodes, _nodes = new HashMap<>();
     
     /* Since 'nodes' is private, final and unexposed, it is used as the lock.
      * If it does not satisfy the aforementioned requirements in future, an
@@ -132,8 +131,7 @@ public class Node implements Runnable {
     
     private void receivedDistanceVector(DistanceVector vector) {
         synchronized (nodes) {
-            List<NodeInfo> updated = new ArrayList<>();
-            List<NodeInfoBase> inform  = new ArrayList<>();
+            backupNodes();
             
             /* When a disconnected neighbor node becomes reachable
              * again or a new node joins the network, it may send a
@@ -150,44 +148,39 @@ public class Node implements Runnable {
             
             NodeInfo _sender = nodes.getOrDefault(vector.source,
                 new NodeInfo(vector.source, reportedDistance));
-            if (putIfAbsent(nodes, vector.source, _sender))
-                updated.add(_sender);
-            
-            List<NodeInfoBase> updates = partition(update -> {
-                NodeInfo node = nodes.get(update.address);
-                return node != null && node.via == null;
-            }, true, vector.nodes);
+            putIfAbsent(nodes, vector.source, _sender);
 
-            for (NodeInfoBase update : updates) {
-                if (update.address == address)
-                    // Neighbor distances are measured by pinging.
-                    continue;
-
+            updates(vector).forEach(update -> {
+                NodeInfo _node = _nodes.get(update.address);
                 NodeInfo node = nodes.get(update.address);
                 double newDistance = _sender.distance + update.distance;
                 
                 if (node == null) {
                     if (Double.isFinite(newDistance)) {
-                        nodes.put(update.address, node =
+                        nodes.put(update.address,
                             new NodeInfo(update.address, newDistance, sender));
-                        updated.add(node);
                     }
-                } else {
-                    if (newDistance < node.distance) {
-                        node.via = sender;
-                        updateByCheckingDescendants(node, newDistance, updated);
-                        updated.add(node);
-                    }
-                    else if (node.distance != newDistance && node.via == sender
-                            && !updated.contains(node)) {
-                        updateByCheckingLinks(node, newDistance);
-                        updated.add(node);
-                    }
-                    if (reportedDistance + node.distance < update.distance
-                            && node.via != sender)
-                        inform.add(update);
+                } else if (newDistance < node.distance
+                        || (newDistance != node.distance
+                        && _node.via == sender && node.via == sender)) {
+                    node.via = sender;
+                    updateByCheckingDescendants(_node, node, newDistance);
                 }
-            }
+            });
+            
+            neighbors().forEach(neighbor -> {
+                NodeInfo node = nodes.get(neighbor.address);
+                if (node.via != null && neighbor.distance <= node.distance) {
+                    node.distance = neighbor.distance;
+                    node.via = null;
+                }
+            });
+            
+            List<NodeInfo> updated = diffNodes();
+            List<NodeInfoBase> inform = updates(vector).filter(update -> {
+                NodeInfo node = nodes.get(update.address);
+                return reportedDistance + node.distance < update.distance;
+            }).collect(Collectors.toList());
 
             if (!updated.isEmpty() | !inform.isEmpty()) {
                 logDistanceVector(vector, updated, inform);
@@ -216,7 +209,7 @@ public class Node implements Runnable {
 
             synchronized (nodes) {
                 // Detect unreachable neighbors
-                List<NodeInfo> updated = new ArrayList<>();
+                backupNodes();
                 for (Iterator<Neighbor> iterator = neighbors.values().iterator();
                         iterator.hasNext();) {
                     Neighbor neighbor = iterator.next();
@@ -227,18 +220,14 @@ public class Node implements Runnable {
                     NodeInfo node = nodes.get(neighbor.address);
                     if (node == null) {
                         if (Double.isFinite(neighbor.distance)) {
-                            nodes.put(neighbor.address,
-                                node = new NodeInfo(neighbor));
-                            updated.add(node);
+                            nodes.put(neighbor.address, new NodeInfo(neighbor));
                         }
                     } else if ((node.via == null
                             && neighbor.distance != node.distance)
                             || (node.via != null
                             && neighbor.distance <= node.distance)) {
-                        updateByCheckingDescendants(node, neighbor.distance,
-                            updated);
+                        updateByCheckingDescendants2(node, neighbor.distance);
                         node.via = null;
-                        updated.add(node);
                     }
                     if (!Double.isFinite(neighbor.distance)
                             && echoRequest - neighbor.lastEcho > LINK_LIFE) {
@@ -251,6 +240,7 @@ public class Node implements Runnable {
                  * distance vector should be atomic in order to avoid the
                  * count-to-infinity problem. No packet loss is assumed.
                  */
+                List<NodeInfo> updated = diffNodes();
                 if (!updated.isEmpty()) {
                     logDistanceVector("echo", updated);
                     neighbors().forEach(Node.this::sendDistanceVector);
@@ -264,31 +254,49 @@ public class Node implements Runnable {
         return neighbors.values().stream()
             .filter(neighbor -> Double.isFinite(neighbor.distance));
     }
-    private void updateByCheckingDescendants(NodeInfo node, double distance,
-            List<NodeInfo> updated) {
-        Neighbor neighbor = neighbors.get(node.address);
-        if (neighbor == null || !Double.isFinite(node.distance)) {
-            node.distance = distance;
-            return; // If the distance of a neighbor is not finite, it cannot
-        }           // have children in the forwarding tree.
-        
-        double delta = distance - node.distance;
-        node.distance += delta;
-        nodes.values().stream()
-            .filter(n -> n.via == neighbor)
-            .forEach(n -> {
-                n.via = node.via != null ? node.via : neighbor;
-                updateByCheckingLinks(n, n.distance + delta);
-                updated.add(n);
-            });
+    private Stream<NodeInfoBase> updates(DistanceVector vector) {
+        return Stream.of(vector.nodes).filter(node -> node.address != address);
     }
-    private void updateByCheckingLinks(NodeInfo node, double distance) {
-        Neighbor neighbor = neighbors.get(node.address);
-        if (neighbor != null && neighbor.distance <= distance) {
-            node.distance = neighbor.distance;
-            node.via = null;
+    
+    private void updateByCheckingDescendants(
+            NodeInfo _node, NodeInfo node, double distance) {
+        // Neighbor used to be directly accessed
+        if (_node != null && _node.via == null) {
+            Neighbor neighbor = neighbors.get(node.address);
+            double delta = distance - _node.distance;
+            _nodes.values().stream().filter(n -> n.via == neighbor)
+                .forEach(_n -> {
+                    double newDistance = _n.distance + delta;
+                    NodeInfo n = nodes.get(_n.address);
+                    if (newDistance < n.distance) {
+                        n.via = node.via != null ? node.via : neighbor;
+                        n.distance = newDistance;
+                    }
+                });
         }
-        else node.distance = distance;
+        node.distance = distance;
+    }
+    private void updateByCheckingDescendants2(NodeInfo node, double distance) {
+        if (node.via == null) { // Neighbor used to be directly accessed
+            Neighbor neighbor = neighbors.get(node.address);
+            double delta = distance - node.distance;
+            nodes.values().stream().filter(n -> n.via == neighbor)
+                .forEach(n -> n.distance += delta);
+        }
+        node.distance = distance;
+    }
+    
+    private void backupNodes() {
+        _nodes.clear();
+        nodes.values().stream().map(NodeInfo::new)
+            .forEach(node -> _nodes.put(node.address, node));
+    }
+    private List<NodeInfo> diffNodes() {
+        return nodes.values().stream().filter(node -> {
+            NodeInfo _node = _nodes.get(node.address);
+            return _node == null || _node.distance != node.distance
+                || _node.via != node.via;
+        }).collect(Collectors.toList());
     }
     private void filterNodes() {
         nodes.entrySet().removeIf(e -> !Double.isFinite(e.getValue().distance));
@@ -420,6 +428,9 @@ public class Node implements Runnable {
         public NodeInfo(int address, double distance) {
             this(address, distance, null);
         }
+        public NodeInfo(NodeInfo info) {
+            this(info.address, info.distance, info.via);
+        }
         public NodeInfo(Neighbor info) {
             this(info.address, info.distance);
         }
@@ -442,15 +453,6 @@ public class Node implements Runnable {
         if (v == null)
             map.put(key, value);
         return v == null;
-    }
-    
-    private static <T> List<T> partition(
-            Predicate<? super T> predicate, boolean reverse, T... values) {
-        return Stream.of(values)
-            .collect(Collectors.partitioningBy(
-                reverse ? predicate.negate() : predicate))
-            .values().stream().flatMap(List::stream)
-            .collect(Collectors.toList());
     }
     
     private static String format(double number) {
